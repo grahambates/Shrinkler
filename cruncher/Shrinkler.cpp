@@ -396,6 +396,10 @@ int main2(int argc, const char *argv[]) {
 #ifdef S_IRWXU // Is the POSIX file permission API available?
 	chmod(outfile, 0755); // Mark file executable
 #endif
+	char statsfile[512];
+	sprintf(statsfile, "%s.shrinklerstats", outfile);
+	crunched->save_stats(statsfile);
+
 	printf("Final file size: %d\n\n", crunched->size());
 	delete crunched;
 

@@ -45,6 +45,8 @@ public:
 		relocstart = 0;
 		relocshortstart = 0;
 		relocentries = 0;
+		symstart = 0;
+		symentries = 0;
 	}
 
 	unsigned type;        // HUNK_<type>
@@ -54,6 +56,8 @@ public:
 	int relocstart;       // longword index in file
 	int relocshortstart;  // longword index in file
 	int relocentries;     // no. of entries
+	int symstart;         // longword index in file
+	int symentries;       // no. of entries
 };
 
 // Compare waste space
@@ -147,10 +151,103 @@ public:
 	}
 };
 
+class LZStats : public LZReceiver, public CompressedDataReadListener {
+	unsigned char* data;
+	int data_length;
+	int pos;
+	int cur_sym;
+
+	struct Symbol {
+		int pos, size;
+		int compressedPos, compressedSize;
+		char* name;
+	};
+	vector<Symbol> symbols;
+
+	unsigned char getData(int i) {
+		if(data == NULL || i >= data_length) return 0;
+		return data[i];
+	}
+
+public:
+	int compressed_longword_count;
+
+	LZStats(unsigned char* data, int data_length, Longword* in_symbols, int symbols_count) : data(data), data_length(data_length), pos(0), cur_sym(0) {
+		if(in_symbols) {
+			symbols.reserve(symbols_count);
+			int symlen = *in_symbols++;
+			while(symlen > 0) {
+				char* sym_name = (char*)in_symbols;
+				in_symbols += symlen;
+				int sym_pos = *in_symbols++;
+				symlen = *in_symbols++;
+				if(auto at = strrchr(sym_name, '@')) {
+					int sym_size = strtol(at + 1, nullptr, 16);
+					if(sym_size > 0) {
+						symbols.push_back({ sym_pos, sym_size, -1, -1, sym_name });
+					}
+				}
+			}
+			sort(symbols.begin(), symbols.end(), [](const auto& s1, const auto& s2) { return s1.pos < s2.pos; });
+		}
+
+		compressed_longword_count = 0;
+	}
+
+	char* dump(char* out) {
+		bool first = true;
+		for(const auto& sym : symbols) {
+			if(!first)
+				out += sprintf(out, ",\n");
+			// remove position in name
+			char symname[256];
+			strcpy(symname, sym.name);
+			if(auto at = strrchr(symname, '@'))
+				*at = '\0';
+			out += sprintf(out, "    { \"origPos\": %d, \"origSize\": %d, \"compressedPos\": %d, \"compressedSize\": %d, \"name\": \"%s\" }", sym.pos, sym.size, sym.compressedPos, sym.compressedSize, symname);
+			first = false;
+		}
+		out += sprintf(out, "\n");
+		return out;
+	}
+
+	bool receiveLiteral(unsigned char lit) {
+		pos += 1;
+		return true;
+	}
+
+	bool receiveReference(int offset, int length) {
+		pos += length;
+		return true;
+	}
+
+	int size() {
+		return pos;
+	}
+
+	void read(int index) {
+		while(cur_sym < symbols.size() && pos >= symbols[cur_sym].pos + symbols[cur_sym].size)
+			cur_sym++;
+
+		if(cur_sym < symbols.size() && pos >= symbols[cur_sym].pos && pos < symbols[cur_sym].pos + symbols[cur_sym].size) {
+			if(symbols[cur_sym].compressedPos == -1)
+				symbols[cur_sym].compressedPos = compressed_longword_count * 4;
+			//printf("%x => %s\n", pos, symbols[cur_sym].name);
+			symbols[cur_sym].compressedSize += 4;
+		} else {
+			//printf("%x => ???\n", pos);
+		}
+
+		// Another longword of compresed data read
+		compressed_longword_count += 1;
+	}
+};
+
 
 class HunkFile {
 	vector<Longword> data;
 	vector<HunkInfo> hunks;
+	vector<char> stats;
 	int relocshort_total_size;
 
 	vector<unsigned> compress_hunks(PackParams *params, bool overlap, bool mini, RefEdgeFactory *edge_factory, bool show_progress) {
@@ -302,6 +399,52 @@ class HunkFile {
 		return count_and_hunksize;
 	}
 
+	vector<char> get_stats(vector<unsigned>& pack_buffer) {
+		vector<char> stats_buffer(64 * 1024, '\0');
+		char* stats_out = stats_buffer.data();
+		stats_out += sprintf(stats_out, "{ \"hunks\": [\n");
+		int numhunks = hunks.size();
+		RangeDecoder decoder(LZEncoder::NUM_CONTEXTS + NUM_RELOC_CONTEXTS, pack_buffer);
+		LZDecoder lzd(&decoder);
+		for(int h = 0; h < numhunks; h++) {
+			unsigned char* hunk_data = NULL;
+			int hunk_data_length = hunks[h].datasize * 4;
+			Longword* hunk_symbols = NULL;
+			int hunk_symbols_count = 0;
+			if(hunks[h].type != HUNK_BSS) {
+				// Find hunk data
+				hunk_data = (unsigned char*)&data[hunks[h].datastart];
+				if(hunks[h].symstart != 0) {
+					hunk_symbols = &data[hunks[h].symstart];
+					hunk_symbols_count = hunks[h].symentries;
+				}
+			}
+
+			// Get statistics
+			LZStats stats(hunk_data, hunk_data_length, hunk_symbols, hunk_symbols_count);
+			decoder.reset();
+			decoder.setListener(&stats);
+			lzd.decode(stats);
+
+			// Skip relocs
+			for(int rh = 0; rh < numhunks; rh++) {
+				int delta;
+				do {
+					delta = decoder.decodeNumber(LZEncoder::NUM_CONTEXTS);
+				} while(delta != 2);
+			}
+
+			if(h != 0)
+				stats_out += sprintf(stats_out, "  ,\n");
+			stats_out += sprintf(stats_out, "  { \"index\": %d, \"name\": \"%s.%s\", \"origSize\": %d, \"compressedSize\": %d, ", h, hunktype[hunks[h].type - HUNK_UNIT], hunks[h].flags == HUNKF_CHIP ? "CHIP" : hunks[h].flags == HUNKF_FAST ? "FAST" : "ANY", hunks[h].datasize * 4, stats.compressed_longword_count * 4);
+			stats_out += sprintf(stats_out, "\"symbols\": [\n");
+			stats_out = stats.dump(stats_out);
+			stats_out += sprintf(stats_out, "  ] }");
+		}
+		stats_out += sprintf(stats_out, "\n] }\n");
+		return stats_buffer;
+	}
+
 public:
 	void load(const char *filename) {
 		FILE *file;
@@ -329,6 +472,22 @@ public:
 		FILE *file;
 		if ((file = fopen(filename, "wb"))) {
 			if (fwrite(&data[0], 4, data.size(), file) == data.size()) {
+				fclose(file);
+				return;
+			}
+		}
+
+		printf("Error while writing file %s\n\n", filename);
+		exit(1);
+	}
+
+	void save_stats(const char* filename) {
+		if(stats.empty() || stats[0] == '\0')
+			return;
+
+		FILE* file;
+		if((file = fopen(filename, "wt"))) {
+			if(fwrite(stats.data(), 1, strlen(stats.data()), file) == strlen(stats.data())) {
 				fclose(file);
 				return;
 			}
@@ -426,12 +585,14 @@ public:
 					break;
 				case HUNK_SYMBOL:
 					n_symbols = 0;
+					hunks[h].symstart = index;
 					symlen = data[index++];
 					while (symlen > 0) {
 						n_symbols++;
 						index += symlen+1;
 						symlen = data[index++];
 					}
+					hunks[h].symentries = n_symbols;
 					printf("           SYMBOL (%d entries)\n", n_symbols);
 					break;
 				case HUNK_CODE:
@@ -693,6 +854,31 @@ public:
 				}
 			}
 
+			// Transfer all symbol information to the new hunk
+			ef->data[dpos++] = HUNK_SYMBOL;
+			ef->hunks[dh].symstart = dpos;
+			ef->hunks[dh].symentries = 0;
+
+			for(int shi = 0; shi < hunklist[dh].second.size(); shi++) {
+				int sh = hunklist[dh].second[shi];
+				if(hunks[sh].type != HUNK_BSS) {
+					int spos = hunks[sh].symstart;
+					int symlen = data[spos++];
+					while(symlen > 0) {
+						ef->data[dpos++] = symlen;
+						ef->hunks[dh].symentries++;
+						char* symname = (char*)&data[spos];
+						for(int i = 0; i < symlen; i++)
+							ef->data[dpos++] = data[spos++];
+						int symval = data[spos++];
+						//printf("%s: %x + %x => %x\n", symname, symval, offset[sh], symval + offset[sh]);
+						ef->data[dpos++] = symval + offset[sh]; // adjust symbol value
+						symlen = data[spos++];
+					}
+				}
+			}
+			ef->data[dpos++] = 0; // terminate symbol hunk
+
 			// Transfer all reloc information to the new hunk.
 			ef->data[dpos++] = HUNK_RELOC32;
 			ef->hunks[dh].relocstart = dpos;
@@ -804,6 +990,11 @@ public:
 		int bufsize = data.size() * 11 / 10 + 1000;
 
 		HunkFile *ef = new HunkFile;
+		if(!mini) {
+			ef->stats = get_stats(pack_buffer);
+		}
+
+
 		ef->data.resize(bufsize, 0);
 
 		int dpos = 0;
