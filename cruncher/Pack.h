@@ -35,13 +35,17 @@ class PackProgress : public LZProgress {
 	}
 
 	void rewind() {
-		printf("\033[%dD", textlength);
+		char xxx[128]{};
+		for(int i = 0; i < textlength; i++)
+			xxx[i] = '\b';
+		//printf("\033[%dD", textlength);
+		printf("%s", xxx);
 	}
 public:
 	virtual void begin(int size) {
 		this->size = size;
 		steps = 0;
-		next_step_threshold = size / 1000;
+		next_step_threshold = size / 100;
 		print();
 	}
 
@@ -49,7 +53,7 @@ public:
 		if (pos < next_step_threshold) return;
 		while (pos >= next_step_threshold) {
 			steps += 1;
-			next_step_threshold = (long long) size * (steps + 1) / 1000;
+			next_step_threshold = (long long) size * (steps + 1) / 100;
 		}
 		rewind();
 		print();
@@ -57,7 +61,7 @@ public:
 
 	virtual void end() {
 		rewind();
-		printf("\033[K");
+		//printf("\033[K");
 		fflush(stdout);
 	}
 };
