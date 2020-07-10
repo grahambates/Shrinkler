@@ -160,7 +160,7 @@ class LZStats : public LZReceiver, public CompressedDataReadListener {
 	struct Symbol {
 		int pos, size;
 		int compressedPos, compressedSize;
-		char* name;
+		const char* name;
 	};
 	vector<Symbol> symbols;
 
@@ -172,7 +172,7 @@ class LZStats : public LZReceiver, public CompressedDataReadListener {
 public:
 	int compressed_longword_count;
 
-	LZStats(unsigned char* data, int data_length, Longword* in_symbols, int symbols_count) : data(data), data_length(data_length), pos(0), cur_sym(0) {
+	LZStats(unsigned char* data, int data_length, Longword* in_symbols, int symbols_count, int reloc_length) : data(data), data_length(data_length), pos(0), cur_sym(0) {
 		if(in_symbols) {
 			symbols.reserve(symbols_count);
 			int symlen = *in_symbols++;
@@ -188,6 +188,8 @@ public:
 					}
 				}
 			}
+			if(reloc_length)
+				symbols.push_back({ data_length, reloc_length, -1, -1, "[Reloc]" });
 			sort(symbols.begin(), symbols.end(), [](const auto& s1, const auto& s2) { return s1.pos < s2.pos; });
 		}
 
@@ -411,6 +413,7 @@ class HunkFile {
 			int hunk_data_length = hunks[h].datasize * 4;
 			Longword* hunk_symbols = NULL;
 			int hunk_symbols_count = 0;
+			int hunk_reloc_length = 0;
 			if(hunks[h].type != HUNK_BSS) {
 				// Find hunk data
 				hunk_data = (unsigned char*)&data[hunks[h].datastart];
@@ -418,10 +421,29 @@ class HunkFile {
 					hunk_symbols = &data[hunks[h].symstart];
 					hunk_symbols_count = hunks[h].symentries;
 				}
+				// count hunk relocs - code from compress_hunks
+				int reloc_size = 0;
+				for(int rh = 0; rh < numhunks; rh++) {
+					vector<int> offsets;
+					if(hunks[h].relocstart != 0) {
+						int spos = hunks[h].relocstart;
+						while(data[spos] != 0) {
+							int rn = data[spos++];
+							if(data[spos++] == rh) {
+								while(rn--) {
+									offsets.push_back(data[spos++]);
+								}
+							} else {
+								spos += rn;
+							}
+						}
+					}
+					hunk_reloc_length = offsets.size() * 4;
+				}
 			}
 
 			// Get statistics
-			LZStats stats(hunk_data, hunk_data_length, hunk_symbols, hunk_symbols_count);
+			LZStats stats(hunk_data, hunk_data_length, hunk_symbols, hunk_symbols_count, hunk_reloc_length);
 			decoder.reset();
 			decoder.setListener(&stats);
 			lzd.decode(stats);
@@ -436,7 +458,9 @@ class HunkFile {
 
 			if(h != 0)
 				stats_out += sprintf(stats_out, "  ,\n");
-			stats_out += sprintf(stats_out, "  { \"index\": %d, \"name\": \"%s.%s\", \"origSize\": %d, \"compressedSize\": %d, ", h, hunktype[hunks[h].type - HUNK_UNIT], hunks[h].flags == HUNKF_CHIP ? "CHIP" : hunks[h].flags == HUNKF_FAST ? "FAST" : "ANY", hunks[h].datasize * 4, stats.compressed_longword_count * 4);
+			stats_out += sprintf(stats_out, "  { \"index\": %d, \"name\": \"%s.%s\", \"origSize\": %d, \"compressedSize\": %d, ", 
+				h, hunktype[hunks[h].type - HUNK_UNIT], hunks[h].flags == HUNKF_CHIP ? "CHIP" : hunks[h].flags == HUNKF_FAST ? "FAST" : "ANY", 
+				hunks[h].datasize * 4 + hunk_reloc_length, stats.compressed_longword_count * 4);
 			stats_out += sprintf(stats_out, "\"symbols\": [\n");
 			stats_out = stats.dump(stats_out);
 			stats_out += sprintf(stats_out, "  ] }");
