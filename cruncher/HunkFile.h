@@ -886,18 +886,19 @@ public:
 			for(int shi = 0; shi < hunklist[dh].second.size(); shi++) {
 				int sh = hunklist[dh].second[shi];
 				if(hunks[sh].type != HUNK_BSS) {
-					int spos = hunks[sh].symstart;
-					int symlen = data[spos++];
-					while(symlen > 0) {
-						ef->data[dpos++] = symlen;
-						ef->hunks[dh].symentries++;
-						char* symname = (char*)&data[spos];
-						for(int i = 0; i < symlen; i++)
-							ef->data[dpos++] = data[spos++];
-						int symval = data[spos++];
-						//printf("%s: %x + %x => %x\n", symname, symval, offset[sh], symval + offset[sh]);
-						ef->data[dpos++] = symval + offset[sh]; // adjust symbol value
-						symlen = data[spos++];
+					if(int spos = hunks[sh].symstart) {
+						int symlen = data[spos++];
+						while(symlen > 0) {
+							ef->data[dpos++] = symlen;
+							ef->hunks[dh].symentries++;
+							char* symname = (char*)&data[spos];
+							for(int i = 0; i < symlen; i++)
+								ef->data[dpos++] = data[spos++];
+							int symval = data[spos++];
+							//printf("%s: %x + %x => %x\n", symname, symval, offset[sh], symval + offset[sh]);
+							ef->data[dpos++] = symval + offset[sh]; // adjust symbol value
+							symlen = data[spos++];
+						}
 					}
 				}
 			}
