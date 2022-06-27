@@ -30,7 +30,7 @@ class PackProgress : public LZProgress {
 	int textlength;
 
 	void print() {
-		textlength = printf("[%d.%d%%]", steps / 10, steps % 10);
+		textlength = printf("[%d%%]", steps);
 		fflush(stdout);
 	}
 
